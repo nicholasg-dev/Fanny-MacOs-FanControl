@@ -30,6 +30,8 @@ final class FanAnimationView: NSView {
     private var currentSpeed: Double
     private var maxSpeed: Double
     private var isAnimationPaused = false
+    /// The rate the rotation animation was last configured for, in revolutions per second.
+    private var configuredRevolutionsPerSecond: Double?
     private var notificationObservers: [NSObjectProtocol] = []
 
     init(currentSpeed: Double, maxSpeed: Double) {
@@ -41,6 +43,7 @@ final class FanAnimationView: NSView {
         layer = CALayer()
         layer?.backgroundColor = NSColor.clear.cgColor
         buildLayers()
+        updateAccessibilityDescription()
         observeApplicationActivity()
     }
 
@@ -83,6 +86,7 @@ final class FanAnimationView: NSView {
 
         guard hasSpeedChange else { return }
         updateBladeColors()
+        updateAccessibilityDescription()
 
         // While inactive the layer is paused. Its current rate is applied only
         // when it returns to the foreground, avoiding any background animation.
@@ -172,6 +176,18 @@ final class FanAnimationView: NSView {
         ]
     }
 
+    // MARK: - Accessibility
+    //
+    // The blades are turned by the window server rather than redrawn, so the
+    // motion itself carries nothing a screen reader can perceive. The view is
+    // published as a single element whose value is the measured speed.
+    private func updateAccessibilityDescription() {
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        setAccessibilityLabel(L10n.text("Fan indicator"))
+        setAccessibilityValue(L10n.formatCount("Fan at %d RPM", Int(currentSpeed.rounded())))
+    }
+
     private func configureRotation(preservingCurrentAngle: Bool) {
         guard fanLayer.bounds.width > 0 else { return }
 
@@ -189,6 +205,17 @@ final class FanAnimationView: NSView {
         // are still visible and the top of the physical range does not become a blur.
         let ratio = min(max(currentSpeed / max(maxSpeed, 1), 0), 1)
         let visualRevolutionsPerSecond = 2.0 * pow(ratio, 0.55)
+
+        // The RPM reading jitters by a few revolutions every second. Re-adding the
+        // animation for each jitter restarts it, so a running animation is kept unless
+        // its rate has changed by more than 5%.
+        if preservingCurrentAngle,
+           let configured = configuredRevolutionsPerSecond,
+           fanLayer.animation(forKey: "fanRotation") != nil || configured == 0,
+           abs(visualRevolutionsPerSecond - configured) <= max(configured, 0.05) * 0.05 {
+            return
+        }
+        configuredRevolutionsPerSecond = visualRevolutionsPerSecond
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)

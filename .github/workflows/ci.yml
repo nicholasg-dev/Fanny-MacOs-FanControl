@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+# Superseded runs on the same ref are dead weight on a macOS runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      # Report every SDK generation rather than hiding the second failure.
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+
+    # Single source of truth: build.sh reads these, verify-build.sh asserts
+    # against the same two.
+    env:
+      ARCHS: "arm64 x86_64"
+      MACOS_DEPLOYMENT_TARGET: "13.0"
+      # Ad-hoc. No Developer ID certificate exists on a stock runner, and the
+      # default identity in build.sh must never be required to build here.
+      SIGNING_IDENTITY: "-"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          xcode-select -p
+          swiftc --version
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Verify packaged app
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/verify-build.sh
+          ./.github/scripts/verify-build.sh
+
+      # hdiutil cannot always create a disk image on a hosted runner; build.sh
+      # falls back to a ZIP, so publish whichever we actually got. The ZIP is
+      # the portable fallback that makes this job useful either way.
+      - name: Upload app artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fan-control-${{ matrix.os }}
+          path: |
+            Fan Control.zip
+            Fan Control.dmg
+          if-no-files-found: warn
+          retention-days: 14
+
+  localization:
+    name: Localization parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check .strings key parity
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/check-localization.sh
+          ./.github/scripts/check-localization.sh

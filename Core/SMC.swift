@@ -7,7 +7,18 @@
 //
 
 import Foundation
+import Dispatch
 import IOKit
+
+/// Largest payload the SMC wire format can carry for a single key.
+///
+/// `SMCKeyData_t.bytes` is a fixed 32-element tuple that sits at the *end* of the
+/// struct, so anything past 32 bytes is read from (or written to) adjacent stack
+/// memory by the kernel. Every `dataSize` that crosses the kernel boundary is
+/// therefore clamped against this value rather than trusted.
+internal enum SMCLimits {
+    static let payloadCapacity = 32
+}
 
 internal enum SMCDataType: String {
     case UI8 = "ui8 "
@@ -100,10 +111,42 @@ internal struct SMCVal_t {
     var key: String
     var dataSize: UInt32 = 0
     var dataType: String = ""
-    var bytes: [UInt8] = Array(repeating: 0, count: 32)
+    /// Always allocated at `SMCLimits.payloadCapacity` (32) elements, regardless of
+    /// the value's real `dataSize`, so fixed-width decoders below can index it
+    /// without a bounds check on every branch.
+    ///
+    /// - Performance note: this is a heap `Array`, so every read costs one
+    ///   32-byte allocation. The helper performs roughly 41 reads per invocation
+    ///   (~41 tiny allocations), which is negligible next to the two IOKit round
+    ///   trips each read performs. The durable fix for the per-poll read cost is
+    ///   replacing the fork-per-poll CLI with a persistent XPC service — see the
+    ///   note in `Helper/main.swift`. Not done here: it is a deliberate,
+    ///   out-of-scope change.
+    var bytes: [UInt8] = Array(repeating: 0, count: SMCLimits.payloadCapacity)
 
     init(_ key: String) {
         self.key = key
+    }
+
+    /// Layout of an `{fds` value: `fdsHeaderLength` leading bytes of framing
+    /// followed by a fixed-width character field.
+    static let fdsHeaderLength = 4
+    static let fdsCharacterCount = 12
+}
+
+/// Diagnostics from the SMC layer.
+///
+/// The helper's stdout is a machine-readable JSON channel that the app decodes
+/// directly, so anything written here must go to stderr instead of polluting it.
+internal enum SMCLog {
+    /// When set, diagnostics are suppressed entirely. The helper enables this for
+    /// the `get` command so a failed read can never corrupt the JSON payload.
+    internal static var isSuppressed = false
+
+    internal static func error(_ message: @autoclosure () -> String) {
+        guard !isSuppressed else { return }
+        let text = "smc-helper: \(message())\n"
+        FileHandle.standardError.write(Data(text.utf8))
     }
 }
 
@@ -166,23 +209,23 @@ public class SMC {
         let device: io_object_t
 
         let matchingDictionary: CFMutableDictionary = IOServiceMatching("AppleSMC")
-        result = IOServiceGetMatchingServices(kIOMasterPortDefault, matchingDictionary, &iterator)
+        result = IOServiceGetMatchingServices(kIOMainPortDefault, matchingDictionary, &iterator)
         if result != kIOReturnSuccess {
-            print("Error IOServiceGetMatchingServices(): " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("Error IOServiceGetMatchingServices(): " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
             return
         }
 
         device = IOIteratorNext(iterator)
         IOObjectRelease(iterator)
         if device == 0 {
-            print("Error: No AppleSMC device found.")
+            SMCLog.error("Error: No AppleSMC device found.")
             return
         }
 
         result = IOServiceOpen(device, mach_task_self_, 0, &conn)
         IOObjectRelease(device)
         if result != kIOReturnSuccess {
-            print("Error IOServiceOpen(): " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("Error IOServiceOpen(): " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
             return
         }
     }
@@ -190,7 +233,7 @@ public class SMC {
     deinit {
         let result = self.close()
         if result != kIOReturnSuccess && conn != 0 {
-            print("error close smc connection: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("error close smc connection: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
         }
     }
 
@@ -225,40 +268,53 @@ public class SMC {
             case SMCDataType.UI8.rawValue:
                 return Double(val.bytes[0])
             case SMCDataType.UI16.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 return Double(UInt16(bytes: (val.bytes[0], val.bytes[1])))
             case SMCDataType.UI32.rawValue:
+                guard val.bytes.count >= 4 else { return nil }
                 return Double(UInt32(bytes: (val.bytes[0], val.bytes[1], val.bytes[2], val.bytes[3])))
             case SMCDataType.SP1E.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let result: Double = Double(UInt16(val.bytes[0]) * 256 + UInt16(val.bytes[1]))
                 return Double(result / 16384)
             case SMCDataType.SP3C.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let result: Double = Double(UInt16(val.bytes[0]) * 256 + UInt16(val.bytes[1]))
                 return Double(result / 4096)
             case SMCDataType.SP4B.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let result: Double = Double(UInt16(val.bytes[0]) * 256 + UInt16(val.bytes[1]))
                 return Double(result / 2048)
             case SMCDataType.SP5A.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let result: Double = Double(UInt16(val.bytes[0]) * 256 + UInt16(val.bytes[1]))
                 return Double(result / 1024)
             case SMCDataType.SP69.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let result: Double = Double(UInt16(val.bytes[0]) * 256 + UInt16(val.bytes[1]))
                 return Double(result / 512)
             case SMCDataType.SP78.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let intValue: Double = Double(Int(val.bytes[0]) * 256 + Int(val.bytes[1]))
                 return Double(intValue / 256)
             case SMCDataType.SP87.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let intValue: Double = Double(Int(val.bytes[0]) * 256 + Int(val.bytes[1]))
                 return Double(intValue / 128)
             case SMCDataType.SP96.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let intValue: Double = Double(Int(val.bytes[0]) * 256 + Int(val.bytes[1]))
                 return Double(intValue / 64)
             case SMCDataType.SPA5.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let result: Double = Double(UInt16(val.bytes[0]) * 256 + UInt16(val.bytes[1]))
                 return Double(result / 32)
             case SMCDataType.SPB4.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let intValue: Double = Double(Int(val.bytes[0]) * 256 + Int(val.bytes[1]))
                 return Double(intValue / 16)
             case SMCDataType.SPF0.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 let intValue: Double = Double(Int(val.bytes[0]) * 256 + Int(val.bytes[1]))
                 return intValue
             case SMCDataType.FLT.rawValue:
@@ -268,6 +324,7 @@ public class SMC {
                 }
                 return nil
             case SMCDataType.FPE2.rawValue:
+                guard val.bytes.count >= 2 else { return nil }
                 return Double(Int(fromFPE2: (val.bytes[0], val.bytes[1])))
             default:
                 return nil
@@ -293,20 +350,24 @@ public class SMC {
 
             switch val.dataType {
             case SMCDataType.FDS.rawValue:
-                let c1  = String(UnicodeScalar(val.bytes[4]))
-                let c2  = String(UnicodeScalar(val.bytes[5]))
-                let c3  = String(UnicodeScalar(val.bytes[6]))
-                let c4  = String(UnicodeScalar(val.bytes[7]))
-                let c5  = String(UnicodeScalar(val.bytes[8]))
-                let c6  = String(UnicodeScalar(val.bytes[9]))
-                let c7  = String(UnicodeScalar(val.bytes[10]))
-                let c8  = String(UnicodeScalar(val.bytes[11]))
-                let c9  = String(UnicodeScalar(val.bytes[12]))
-                let c10 = String(UnicodeScalar(val.bytes[13]))
-                let c11 = String(UnicodeScalar(val.bytes[14]))
-                let c12 = String(UnicodeScalar(val.bytes[15]))
+                // An FDS value is a 4-byte header followed by a fixed 12-character,
+                // NUL/space padded string. Reading bytes 4...15 off a value the
+                // kernel reported as shorter than that would surface uninitialised
+                // payload as a bogus name, so refuse undersized values outright.
+                guard val.dataSize >= UInt32(SMCVal_t.fdsHeaderLength + SMCVal_t.fdsCharacterCount),
+                      val.bytes.count >= SMCVal_t.fdsHeaderLength + SMCVal_t.fdsCharacterCount else {
+                    SMCLog.error("[\(key)] fds value too short: dataSize=\(val.dataSize)")
+                    return nil
+                }
 
-                return (c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10 + c11 + c12).trimmingCharacters(in: .whitespaces)
+                // Appending scalars directly avoids allocating twelve one-character
+                // Strings per fan name on every poll.
+                var name = String.UnicodeScalarView()
+                for index in SMCVal_t.fdsHeaderLength..<(SMCVal_t.fdsHeaderLength + SMCVal_t.fdsCharacterCount) {
+                    name.append(UnicodeScalar(val.bytes[index]))
+                }
+
+                return String(name).trimmingCharacters(in: .whitespaces)
             default:
                 return nil
             }
@@ -332,36 +393,7 @@ public class SMC {
         if mode == .forced {
             return unlockFanControl(fanId: id)
         } else {
-            let modeKey = fanModeKey(id)
-            let targetKey = "F\(id)Tg"
-
-            if self.getValue(modeKey) != nil {
-                var modeVal = SMCVal_t(modeKey)
-                let readResult = read(&modeVal)
-                guard readResult == kIOReturnSuccess else {
-                    print(smcError("read", key: modeKey, result: readResult))
-                    return false
-                }
-                if modeVal.bytes[0] != 0 {
-                    modeVal.bytes[0] = 0
-                    if !writeWithRetry(modeVal) { return false }
-                }
-            }
-
-            var targetValue = SMCVal_t(targetKey)
-            let result = read(&targetValue)
-            guard result == kIOReturnSuccess else {
-                print(smcError("read", key: targetKey, result: result))
-                return false
-            }
-
-            let bytes = Float(0).bytes
-            targetValue.bytes[0] = bytes[0]
-            targetValue.bytes[1] = bytes[1]
-            targetValue.bytes[2] = bytes[2]
-            targetValue.bytes[3] = bytes[3]
-
-            return writeWithRetry(targetValue)
+            return setFanAutomatic(id, deadline: nil)
         }
         #else
         // Intel
@@ -371,7 +403,7 @@ public class SMC {
 
             result = read(&value)
             if result != kIOReturnSuccess {
-                print("Error read fan mode: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+                SMCLog.error("Error read fan mode: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
                 return false
             }
 
@@ -384,7 +416,7 @@ public class SMC {
 
             result = write(value)
             if result != kIOReturnSuccess {
-                print("Error write: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+                SMCLog.error("Error write: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
                 return false
             }
         }
@@ -419,7 +451,7 @@ public class SMC {
 
         result = read(&value)
         if result != kIOReturnSuccess {
-            print("Error read fan mode: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("Error read fan mode: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
             return false
         }
 
@@ -432,7 +464,7 @@ public class SMC {
 
         result = write(value)
         if result != kIOReturnSuccess {
-            print("Error write: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("Error write: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
             return false
         }
         return true
@@ -447,7 +479,7 @@ public class SMC {
         var modeVal = SMCVal_t(fanModeKey(id))
         let modeResult = read(&modeVal)
         guard modeResult == kIOReturnSuccess else {
-            print("Error read fan mode: " + (String(cString: mach_error_string(modeResult), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("Error read fan mode: " + (String(cString: mach_error_string(modeResult), encoding: String.Encoding.ascii) ?? "unknown error"))
             return false
         }
         if modeVal.bytes[0] != 1 {
@@ -460,7 +492,7 @@ public class SMC {
 
         result = read(&value)
         if result != kIOReturnSuccess {
-            print("Error read fan value: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("Error read fan value: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
             return false
         }
 
@@ -482,7 +514,7 @@ public class SMC {
         #else
         result = write(value)
         if result != kIOReturnSuccess {
-            print("Error write: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
+            SMCLog.error("Error write: " + (String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"))
             return false
         }
         return true
@@ -492,12 +524,108 @@ public class SMC {
     // MARK: - Apple Silicon Fan Control
 
     #if arch(arm64)
+    /// Tunable timings for the Apple Silicon unlock/reset paths.
+    ///
+    /// Every retry loop below is additionally bounded by a wall-clock `Deadline`,
+    /// so these numbers only control retry *spacing*, not the worst-case block.
+    ///
+    /// Override `FANCONTROL_UNLOCK_BUDGET_SECONDS` (and
+    /// `FANCONTROL_RESET_BUDGET_SECONDS`) to give stubborn hardware more patience
+    /// without recompiling.
+    internal enum UnlockTiming {
+        /// Spacing between plain SMC write retries (the ordinary, non-unlock case).
+        static let writeDelayMicros: UInt32 = 50_000
+        static let writeAttempts = 10
+
+        /// Retries for the `Ftst` unlock write. Spaced tightly because the SMC
+        /// rejects the write while thermalmonitord still owns the fan keys.
+        static let ftstAttempts = 20
+
+        /// How long to let thermalmonitord hand control back after `Ftst` is set.
+        /// This delay is hardware-validated behaviour and is deliberately left at
+        /// its proven 3s; it is only truncated if the overall budget runs out.
+        static let thermalmonitordYieldMicros: UInt32 = 3_000_000
+
+        /// Spacing between mode-write retries after the yield.
+        static let modeWriteDelayMicros: UInt32 = 100_000
+
+        /// Hard wall-clock ceiling for a single `unlockFanControl` call.
+        static var unlockBudgetSeconds: Double {
+            Self.positiveDouble(fromEnvironment: "FANCONTROL_UNLOCK_BUDGET_SECONDS", default: 8.0)
+        }
+
+        /// Hard wall-clock ceiling for a single `resetFanControl` call.
+        static var resetBudgetSeconds: Double {
+            Self.positiveDouble(fromEnvironment: "FANCONTROL_RESET_BUDGET_SECONDS", default: 6.0)
+        }
+
+        private static func positiveDouble(fromEnvironment name: String, default fallback: Double) -> Double {
+            guard let raw = ProcessInfo.processInfo.environment[name],
+                  let value = Double(raw),
+                  value > 0, value.isFinite else {
+                return fallback
+            }
+            return value
+        }
+    }
+
+    /// A monotonic wall-clock budget for a sequence of retries.
+    ///
+    /// Historically the unlock path used raw attempt counts — 100 retries at 50 ms
+    /// plus a 3 s yield plus 300 retries at 100 ms — so a single stuck unlock
+    /// blocked for ~38 s and a reset for ~11 s. Both run inside the setuid helper,
+    /// and the app waits on `Process.waitUntilExit()`, so every one of those
+    /// seconds is a frozen UI and a stalled poll.
+    ///
+    /// Retries now stop at a deadline. The *sequence* of operations is unchanged
+    /// (direct mode write -> `Ftst` -> thermalmonitord yield -> mode retry) and so
+    /// are the keys involved, which means the success path performs exactly the
+    /// same work in exactly the same order as before; only the failure path is
+    /// now bounded.
+    private struct Deadline {
+        private let expiresAt: DispatchTime
+
+        init(seconds: Double) {
+            // Clamp before converting: an absurd environment override must not
+            // overflow the nanosecond conversion.
+            let clamped = seconds.isFinite ? min(max(seconds, 0), 3_600) : 0
+            self.expiresAt = DispatchTime.now() + .nanoseconds(Int(clamped * 1_000_000_000))
+        }
+
+        var isExpired: Bool {
+            DispatchTime.now() >= expiresAt
+        }
+
+        /// Microseconds left, never negative.
+        private var remainingMicros: UInt64 {
+            let now = DispatchTime.now()
+            guard expiresAt > now else { return 0 }
+            return (expiresAt.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000
+        }
+
+        /// Remaining budget for a sleep, capped at `cap` so a nearly-spent deadline
+        /// cannot stretch a fixed wait past the ceiling.
+        func sleepBudgetMicros(cappedAt cap: UInt32) -> UInt32 {
+            UInt32(min(UInt64(cap), remainingMicros))
+        }
+    }
+
     private func smcError(_ operation: String, key: String, result: kern_return_t) -> String {
         let errorDesc = String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error"
         return "[\(key)] \(operation) failed: \(errorDesc) (0x\(String(result, radix: 16)))"
     }
 
-    private func writeWithRetry(_ value: SMCVal_t, maxAttempts: Int = 10, delayMicros: UInt32 = 50_000) -> Bool {
+    /// Writes `value`, retrying on failure.
+    ///
+    /// - Parameters:
+    ///   - maxAttempts: upper bound on write attempts (the sleep budget may end the
+    ///     loop earlier).
+    ///   - delayMicros: sleep between attempts.
+    ///   - deadline: optional wall-clock ceiling shared across a longer operation.
+    private func writeWithRetry(_ value: SMCVal_t,
+                                maxAttempts: Int = UnlockTiming.writeAttempts,
+                                delayMicros: UInt32 = UnlockTiming.writeDelayMicros,
+                                deadline: Deadline? = nil) -> Bool {
         let mutableValue = value
         var lastResult: kern_return_t = kIOReturnSuccess
         for attempt in 0..<maxAttempts {
@@ -506,20 +634,69 @@ public class SMC {
                 return true
             }
             if attempt < maxAttempts - 1 {
-                usleep(delayMicros)
+                if let deadline = deadline {
+                    guard !deadline.isExpired else {
+                        SMCLog.error(smcError("write", key: value.key, result: lastResult) + " (budget exhausted)")
+                        return false
+                    }
+                    let sleep = deadline.sleepBudgetMicros(cappedAt: delayMicros)
+                    if sleep > 0 { usleep(sleep) }
+                } else {
+                    usleep(delayMicros)
+                }
             }
         }
-        print(smcError("write", key: value.key, result: lastResult))
+        SMCLog.error(smcError("write", key: value.key, result: lastResult))
         return false
     }
 
+    /// Hands one fan back to automatic control on Apple Silicon.
+    ///
+    /// `deadline` bounds the retries when the caller has a time budget, as the
+    /// reset does. Without one, the writes retry on their own schedule, which
+    /// is how a single `set 0` has always behaved.
+    private func setFanAutomatic(_ id: Int, deadline: Deadline?) -> Bool {
+        let modeKey = fanModeKey(id)
+        let targetKey = "F\(id)Tg"
+
+        if self.getValue(modeKey) != nil {
+            var modeVal = SMCVal_t(modeKey)
+            let readResult = read(&modeVal)
+            guard readResult == kIOReturnSuccess else {
+                SMCLog.error(smcError("read", key: modeKey, result: readResult))
+                return false
+            }
+            if modeVal.bytes[0] != 0 {
+                modeVal.bytes[0] = 0
+                if !writeWithRetry(modeVal, deadline: deadline) { return false }
+            }
+        }
+
+        var targetValue = SMCVal_t(targetKey)
+        let result = read(&targetValue)
+        guard result == kIOReturnSuccess else {
+            SMCLog.error(smcError("read", key: targetKey, result: result))
+            return false
+        }
+
+        let bytes = Float(0).bytes
+        targetValue.bytes[0] = bytes[0]
+        targetValue.bytes[1] = bytes[1]
+        targetValue.bytes[2] = bytes[2]
+        targetValue.bytes[3] = bytes[3]
+
+        return writeWithRetry(targetValue, deadline: deadline)
+    }
+
     private func unlockFanControl(fanId: Int) -> Bool {
+        let deadline = Deadline(seconds: UnlockTiming.unlockBudgetSeconds)
+
         // Try direct mode write first (works on M5+ without Ftst)
         let modeKey = fanModeKey(fanId)
         var modeVal = SMCVal_t(modeKey)
         let modeRead = read(&modeVal)
         guard modeRead == kIOReturnSuccess else {
-            print(smcError("read", key: modeKey, result: modeRead))
+            SMCLog.error(smcError("read", key: modeKey, result: modeRead))
             return false
         }
         modeVal.bytes[0] = 1
@@ -535,30 +712,40 @@ public class SMC {
         }
 
         if ftstVal.bytes[0] == 1 {
-            return retryModeWrite(fanId: fanId, maxAttempts: 20)
+            return retryModeWrite(fanId: fanId, deadline: deadline)
         }
 
         ftstVal.bytes[0] = 1
-        if !writeWithRetry(ftstVal, maxAttempts: 100) {
+        if !writeWithRetry(ftstVal, maxAttempts: UnlockTiming.ftstAttempts, deadline: deadline) {
             return false
         }
 
         // Wait for thermalmonitord to yield control
-        usleep(3_000_000)
+        let yieldMicros = deadline.sleepBudgetMicros(cappedAt: UnlockTiming.thermalmonitordYieldMicros)
+        if yieldMicros > 0 {
+            usleep(yieldMicros)
+        }
 
-        return retryModeWrite(fanId: fanId, maxAttempts: 300)
+        return retryModeWrite(fanId: fanId, deadline: deadline)
     }
 
-    private func retryModeWrite(fanId: Int, maxAttempts: Int) -> Bool {
+    private func retryModeWrite(fanId: Int, deadline: Deadline? = nil) -> Bool {
         let modeKey = fanModeKey(fanId)
         var modeVal = SMCVal_t(modeKey)
         let result = read(&modeVal)
         guard result == kIOReturnSuccess else {
-            print(smcError("read", key: modeKey, result: result))
+            SMCLog.error(smcError("read", key: modeKey, result: result))
             return false
         }
         modeVal.bytes[0] = 1
-        return writeWithRetry(modeVal, maxAttempts: maxAttempts, delayMicros: 100_000)
+        // The attempt count is deliberately far larger than the budget allows to be
+        // spent: the deadline is what actually terminates this loop, so the retry
+        // window stays at "as long as the budget allows" rather than being cut to
+        // an arbitrary attempt number.
+        return writeWithRetry(modeVal,
+                              maxAttempts: UnlockTiming.ftstAttempts * 15,
+                              delayMicros: UnlockTiming.modeWriteDelayMicros,
+                              deadline: deadline)
     }
 
     #endif
@@ -569,17 +756,25 @@ public class SMC {
         var ftstVal = SMCVal_t("Ftst")
         
         #if arch(arm64)
+        // A single deadline covers the whole reset: the `Ftst` unlock, the yield,
+        // the per-fan mode writes and the final `Ftst` relock all share it. This
+        // previously capped out at ~11s (2 x 100 retries at 50 ms, plus sleeps).
+        let deadline = Deadline(seconds: UnlockTiming.resetBudgetSeconds)
+
         let ftstReadResult = read(&ftstVal)
         hasFtst = (ftstReadResult == kIOReturnSuccess && ftstVal.dataSize > 0)
         
         if hasFtst {
             if ftstVal.bytes[0] != 1 {
                 ftstVal.bytes[0] = 1
-                if !writeWithRetry(ftstVal, maxAttempts: 100) {
-                    print("Failed to unlock Ftst for reset")
+                if !writeWithRetry(ftstVal, maxAttempts: UnlockTiming.ftstAttempts, deadline: deadline) {
+                    SMCLog.error("Failed to unlock Ftst for reset")
                 } else {
                     // Wait briefly for thermalmonitord to yield control
-                    usleep(1_000_000)
+                    let yieldMicros = deadline.sleepBudgetMicros(
+                        cappedAt: UnlockTiming.thermalmonitordYieldMicros / 3
+                    )
+                    if yieldMicros > 0 { usleep(yieldMicros) }
                 }
             }
         }
@@ -587,7 +782,15 @@ public class SMC {
 
         guard let count = getValue("FNum") else { return false }
         for i in 0..<Int(count) {
-            if !setFanMode(i, mode: .automatic) {
+            #if arch(arm64)
+            // Share the reset's deadline. Without it, each fan's mode and target
+            // writes could retry for about a second beyond the budget, which is
+            // how a reset ran past the app's quit-time timeout.
+            let fanReset = setFanAutomatic(i, deadline: deadline)
+            #else
+            let fanReset = setFanMode(i, mode: .automatic)
+            #endif
+            if !fanReset {
                 success = false
             }
         }
@@ -595,7 +798,7 @@ public class SMC {
         #if arch(arm64)
         if hasFtst {
             ftstVal.bytes[0] = 0
-            if !writeWithRetry(ftstVal, maxAttempts: 100) {
+            if !writeWithRetry(ftstVal, maxAttempts: UnlockTiming.ftstAttempts, deadline: deadline) {
                 success = false
             }
         }
@@ -629,7 +832,22 @@ public class SMC {
             return result
         }
 
-        memcpy(&value.pointee.bytes, &output.bytes, Int(value.pointee.dataSize))
+        // The kernel reports `dataSize` in `readKeyInfo` and we echo it straight
+        // back to ask for that many bytes, but the payload we hand back is a
+        // fixed 32-element tuple inside a fixed-size stack struct. Copying
+        // `dataSize` bytes unconditionally would smash the stack for any key whose
+        // reported size exceeds the payload, so clamp against the real capacity of
+        // both the destination and the source struct.
+        let copyLength = min(
+            Int(value.pointee.dataSize),
+            min(value.pointee.bytes.count, SMCLimits.payloadCapacity)
+        )
+        if copyLength > 0 {
+            memcpy(&value.pointee.bytes, &output.bytes, copyLength)
+        }
+        if Int(value.pointee.dataSize) > copyLength {
+            SMCLog.error("[\(value.pointee.key)] truncated read: dataSize=\(value.pointee.dataSize) > capacity=\(copyLength)")
+        }
         return kIOReturnSuccess
     }
 
@@ -637,9 +855,26 @@ public class SMC {
         var input = SMCKeyData_t()
         var output = SMCKeyData_t()
 
+        let capacity = MemoryLayout<SMCKeyData_t.SMCBytes_t>.size
+        precondition(capacity == SMCLimits.payloadCapacity,
+                     "SMCLimits.payloadCapacity must match SMCKeyData_t.SMCBytes_t")
+
+        // `input.bytes` is a fixed-size tuple and the value's buffer is fixed at the
+        // same capacity, so an undersized value would trap below and an oversized
+        // `dataSize` would make the kernel read past the end of `input`. Refuse the
+        // former and clamp the latter.
+        guard value.bytes.count >= capacity else {
+            SMCLog.error("[\(value.key)] write skipped: value holds \(value.bytes.count) bytes, need \(capacity)")
+            return kIOReturnError
+        }
+        let writeLength = min(Int(value.dataSize), capacity)
+
         input.key = FourCharCode(fromString: value.key)
         input.data8 = SMCKeys.writeBytes.rawValue
-        input.keyInfo.dataSize = IOByteCount32(value.dataSize)
+        input.keyInfo.dataSize = IOByteCount32(writeLength)
+        if Int(value.dataSize) > writeLength {
+            SMCLog.error("[\(value.key)] truncated write: dataSize=\(value.dataSize) > capacity=\(writeLength)")
+        }
         input.bytes = (value.bytes[0], value.bytes[1], value.bytes[2], value.bytes[3], value.bytes[4], value.bytes[5],
                        value.bytes[6], value.bytes[7], value.bytes[8], value.bytes[9], value.bytes[10], value.bytes[11],
                        value.bytes[12], value.bytes[13], value.bytes[14], value.bytes[15], value.bytes[16], value.bytes[17],

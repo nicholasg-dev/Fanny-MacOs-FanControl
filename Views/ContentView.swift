@@ -1,5 +1,22 @@
 import SwiftUI
 
+// MARK: - App Version
+//
+// `build.sh` is the single source of the marketing version: it writes
+// `APP_VERSION` into `CFBundleShortVersionString` and into the DMG volume name.
+// Reading it back out of the bundle is the only way the UI can agree with both
+// without a second hardcoded copy that starts lying the moment `APP_VERSION` is
+// bumped.
+enum AppVersion {
+    /// `CFBundleShortVersionString`, or a visible placeholder if the bundle is
+    /// malformed. A placeholder beats a silent blank badge.
+    static let current: String = {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "—" : trimmed
+    }()
+}
+
 // MARK: - Main Content View
 struct ContentView: View {
     @ObservedObject var viewModel: FanViewModel
@@ -16,19 +33,27 @@ struct ContentView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        Text("Fan Control Center")
+                        Text(L10n.text("Fan Control Center"))
                             .font(.system(size: compactLayout ? 18 : 20, weight: .black))
                             .foregroundColor(.white)
                         
-                        Text("v2.0")
+                        // Rendered from the bundle rather than written out
+                        // here, so the badge cannot drift from
+                        // `CFBundleShortVersionString` (`build.sh`'s
+                        // `APP_VERSION`). The `v` prefix and the interpolation
+                        // shape are unchanged, so this stays a single
+                        // unlocalized literal exactly as it was before — no new
+                        // lookup key, and nothing for the .strings tables to
+                        // gain or lose.
+                        Text("v\(AppVersion.current)")
                             .font(.system(size: 10, weight: .bold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(Color.blue.opacity(0.2))
                             .foregroundColor(.blue)
-                            .cornerRadius(6)
+                            .clipShape(.rect(cornerRadius: 6))
                     }
-                    Text("Mac System SMC Monitoring & Adjustment")
+                    Text(L10n.text("Mac System SMC Monitoring & Adjustment"))
                         .font(.system(size: 11))
                         .foregroundColor(.gray)
                 }
@@ -41,14 +66,17 @@ struct ContentView: View {
                         Circle()
                             .fill(Color.orange)
                             .frame(width: 8, height: 8)
-                        Text("Authorization Required")
+                            .accessibilityHidden(true)
+                        Text(L10n.text("Authorization Required"))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.orange)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(Color.white.opacity(0.04))
-                    .cornerRadius(20)
+                    .clipShape(.rect(cornerRadius: 20))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(L10n.text("Authorization Required"))
                 }
             }
             .padding(.horizontal, horizontalPadding)
@@ -60,7 +88,7 @@ struct ContentView: View {
             
             ScrollView {
                 VStack(spacing: compactLayout ? 14 : 20) {
-                    TempHistoryChartView(history: viewModel.tempHistory, compactLayout: compactLayout)
+                    TempHistoryChartContainer(store: viewModel.history, compactLayout: compactLayout)
                         .padding(.horizontal, horizontalPadding)
                         .frame(maxWidth: .infinity)
                     
@@ -75,14 +103,15 @@ struct ContentView: View {
                                     Image(systemName: "lock.shield.fill")
                                         .font(.system(size: 24))
                                         .foregroundColor(.orange)
+                                        .accessibilityHidden(true)
                                 }
                                 
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text("Helper Authentication Required")
+                                    Text(L10n.text("Helper Authentication Required"))
                                         .font(.system(size: 16, weight: .bold))
                                         .foregroundColor(.white)
                                     
-                                    Text("SMC (System Management Controller) fan modification requires root privileges. A local helper tool is bundled to perform these actions safely. Click below to authorize it (requires administrator password once).")
+                                    Text(L10n.text("SMC (System Management Controller) fan modification requires root privileges. A local helper tool is bundled to perform these actions safely. Click below to authorize it (requires administrator password once)."))
                                         .font(.system(size: 13))
                                         .foregroundColor(.gray)
                                         .lineSpacing(4)
@@ -95,7 +124,7 @@ struct ContentView: View {
                                     .foregroundColor(.red)
                                     .padding(8)
                                     .background(Color.red.opacity(0.1))
-                                    .cornerRadius(6)
+                                    .clipShape(.rect(cornerRadius: 6))
                             }
                             
                             Button(action: {
@@ -106,20 +135,22 @@ struct ContentView: View {
                                 HStack {
                                     Spacer()
                                     Image(systemName: "key.fill")
-                                    Text("Authorize & Enable Fan Adjustments")
+                                        .accessibilityHidden(true)
+                                    Text(L10n.text("Authorize & Enable Fan Adjustments"))
                                     Spacer()
                                 }
                                 .font(.system(size: 13, weight: .bold))
                                 .foregroundColor(.black)
                                 .padding(.vertical, 10)
                                 .background(Color.orange)
-                                .cornerRadius(8)
+                                .clipShape(.rect(cornerRadius: 8))
                             }
                             .buttonStyle(PlainButtonStyle())
+                            .accessibilityLabel(L10n.text("Authorize & Enable Fan Adjustments"))
                         }
                         .padding(20)
                         .background(Color.orange.opacity(0.04))
-                        .cornerRadius(16)
+                        .clipShape(.rect(cornerRadius: 16))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(Color.orange.opacity(0.2), lineWidth: 1)
@@ -129,34 +160,34 @@ struct ContentView: View {
                     }
 
                     // Fans List
-                    if viewModel.fans.isEmpty {
+                    if viewModel.fanCount == 0 {
                         VStack(spacing: 16) {
                             ProgressView()
-                            Text("Reading SMC registers...")
+                                .accessibilityLabel(L10n.text("Reading SMC registers..."))
+                            Text(L10n.text("Reading SMC registers..."))
                                 .font(.system(size: 12))
                                 .foregroundColor(.gray)
                         }
                         .frame(height: 180)
                     } else {
                         VStack(spacing: 16) {
-                            ForEach(viewModel.fans) { fan in
-                                FanControlRow(
-                                    fan: fan,
-                                    viewModel: viewModel,
-                                    compactLayout: compactLayout
-                                )
-                            }
+                            FanRowsView(
+                                telemetry: viewModel.telemetry,
+                                viewModel: viewModel,
+                                compactLayout: compactLayout
+                            )
 
                             // Fan synchronization belongs directly with the fan cards:
                             // it affects the two manual fan controls rather than the
                             // independent automatic-rule configuration below.
-                            if viewModel.isAuthorized && viewModel.fans.count > 1 {
+                            if viewModel.isAuthorized && viewModel.fanCount > 1 {
                                 HStack {
                                     Toggle(isOn: $viewModel.linkedFans) {
                                         HStack(spacing: 6) {
                                             Image(systemName: "link")
                                                 .foregroundColor(viewModel.linkedFans ? .teal : .gray)
-                                            Text("Sync All Fans Together")
+                                                .accessibilityHidden(true)
+                                            Text(L10n.text("Sync All Fans Together"))
                                                 .font(.system(size: 13, weight: .bold))
                                                 .foregroundColor(.white)
                                         }
@@ -175,26 +206,27 @@ struct ContentView: View {
                     // Preserve the monitoring → manual fans → automatic-rules
                     // reading order, while compact fan cards keep this section
                     // discoverable on lower notebook displays.
-                    if viewModel.isAuthorized && !viewModel.fans.isEmpty {
+                    if viewModel.isAuthorized && viewModel.fanCount > 0 {
                         RulesEngineView(viewModel: viewModel)
                     }
 
                     // Secondary application-wide controls follow both the manual
                     // and automatic cooling controls.
-                    if viewModel.isAuthorized && !viewModel.fans.isEmpty {
+                    if viewModel.isAuthorized && viewModel.fanCount > 0 {
                         VStack(spacing: 16) {
                             HStack {
                                 Toggle(isOn: $viewModel.isAutoStart) {
                                     HStack(spacing: 6) {
                                         Image(systemName: "autostartstop")
                                             .foregroundColor(viewModel.isAutoStart ? .teal : .gray)
+                                            .accessibilityHidden(true)
                                         Text(L10n.text("Start at login (background)"))
                                             .font(.system(size: 13, weight: .bold))
                                             .foregroundColor(.white)
                                     }
                                 }
                                 .toggleStyle(SwitchToggleStyle(tint: .teal))
-                                .onChange(of: viewModel.isAutoStart) { newValue in
+                                .onValueChange(of: viewModel.isAutoStart) { newValue in
                                     viewModel.toggleAutoStart(newValue)
                                 }
 
@@ -206,6 +238,7 @@ struct ContentView: View {
                                     HStack(spacing: 6) {
                                         Image(systemName: "square.dashed")
                                             .foregroundColor(viewModel.runInAccessoryMode ? .teal : .gray)
+                                            .accessibilityHidden(true)
                                         Text(L10n.text("Run in accessory mode"))
                                             .font(.system(size: 13, weight: .bold))
                                             .foregroundColor(.white)
@@ -223,21 +256,23 @@ struct ContentView: View {
                                 }) {
                                     HStack {
                                         Image(systemName: "arrow.counterclockwise")
-                                        Text("Reset All to Auto")
+                                            .accessibilityHidden(true)
+                                        Text(L10n.text("Reset All to Auto"))
                                     }
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
                                     .background(Color.white.opacity(0.08))
-                                    .cornerRadius(8)
+                                    .clipShape(.rect(cornerRadius: 8))
                                 }
                                 .buttonStyle(PlainButtonStyle())
+                                .accessibilityLabel(L10n.text("Reset All to Auto"))
                             }
                         }
                         .padding(20)
                         .background(Color.white.opacity(0.02))
-                        .cornerRadius(16)
+                        .clipShape(.rect(cornerRadius: 16))
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .stroke(Color.white.opacity(0.04), lineWidth: 1)
@@ -254,9 +289,53 @@ struct ContentView: View {
         .frame(minWidth: 600, maxWidth: .infinity, minHeight: 680, maxHeight: .infinity, alignment: .top)
         .background(Color(red: 0.08, green: 0.08, blue: 0.1))
         .background(WindowAccessor { window in
+            // Stable handle used by the menu-bar entry point to find and order
+            // this window back in front.
+            window.identifier = NSUserInterfaceItemIdentifier("FanControlMainWindow")
             window.delegate = MainWindowDelegate.shared
             window.minSize = NSSize(width: 600, height: 680)
         })
+    }
+}
+
+// MARK: - Forward-Compatible `onChange`
+//
+// `onChange(of:perform:)` with a single closure parameter is deprecated from
+// macOS 14 in favour of the two-parameter form. Both spellings behave
+// identically, so the modern one is used wherever it exists and the old one is
+// confined to a helper that is itself deprecated for the same reason — which is
+// what lets the app keep its macOS 13 deployment target while compiling warning
+// free at every later target as well.
+@available(macOS, deprecated: 14.0)
+private func legacyOnChange<Content: View, Value: Equatable>(
+    _ content: Content,
+    of value: Value,
+    perform action: @escaping (Value) -> Void
+) -> some View {
+    content.onChange(of: value, perform: action)
+}
+
+private struct CompatibleOnChange<Value: Equatable>: ViewModifier {
+    let value: Value
+    let action: (Value) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.onChange(of: value) { _, newValue in action(newValue) }
+        } else {
+            legacyOnChange(content, of: value, perform: action)
+        }
+    }
+}
+
+extension View {
+    /// `onChange(of:)` without deprecation warnings on macOS 13 through macOS 26.
+    func onValueChange<Value: Equatable>(
+        of value: Value,
+        perform action: @escaping (Value) -> Void
+    ) -> some View {
+        modifier(CompatibleOnChange(value: value, action: action))
     }
 }
 
@@ -279,9 +358,29 @@ struct WindowAccessor: NSViewRepresentable {
 
 class MainWindowDelegate: NSObject, NSWindowDelegate {
     static let shared = MainWindowDelegate()
-    
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
         return false
+    }
+}
+
+// MARK: - Fan Cards
+
+/// The fan cards. They observe the live fan readings on their own, so the
+/// once-a-second update re-renders these cards and nothing else in the window.
+private struct FanRowsView: View {
+    @ObservedObject var telemetry: FanTelemetry
+    let viewModel: FanViewModel
+    let compactLayout: Bool
+
+    var body: some View {
+        ForEach(telemetry.fans) { fan in
+            FanControlRow(
+                fan: fan,
+                viewModel: viewModel,
+                compactLayout: compactLayout
+            )
+        }
     }
 }
