@@ -1,6 +1,6 @@
 # macOS Fan Control Utility
 
-A sleek, native SwiftUI macOS application designed for real-time monitoring and manual/automated control of MacBook fan speeds. Compatible with both Intel and Apple Silicon (M1/M2/M3/M4/M5+) architectures.
+A sleek, native SwiftUI macOS application designed for real-time monitoring and manual/automated control of MacBook fan speeds. The bundle is **universal** — built for both Intel and Apple Silicon (M1/M2/M3/M4/M5+) — but note that the Intel slice **compiles and packages, and has never been run on Intel hardware**. All hardware testing was done on an Apple M5 Max. See [Known limitations](#known-limitations).
 
 ![Main dashboard](screenshot.png)
 
@@ -53,7 +53,7 @@ The codebase is organized into clean, single-responsibility files conforming to 
   - `SMC.swift`: The raw AppleSMC register reads/writes, data-type decoding, and the Apple Silicon fan-unlock and reset sequences.
   - `FanControlLaw.swift`: The extracted control law — sensor conditioning (`TemperatureConditioner`), rule aggregation, the target deadband, the slew-rate limiter on a monotonic clock, cooling hysteresis, and cooling confirmation. A plain value type with no SwiftUI, `Process`, or `UserDefaults`, so thermal behaviour is reviewable and testable on its own. `tests/run-tests.sh` compiles it with its models and runs the checks in `tests/unit/`.
   - `Localization.swift`: The `L10n` wrapper used for labels assembled at runtime. `format` localizes decimals; `formatCount` formats whole counts such as RPM without a thousands separator. See [docs/LOCALIZATION.md](docs/LOCALIZATION.md).
-- 📂 **`Models/`**: Shared structs (`FanJSON.swift`, `TempRecord.swift`) describing deserialized telemetry packages, auto-rules, and history records. `FanJSON.swift` also holds `TriggerRule` and its `starterRules`, the first-run curves.
+- 📂 **`Models/`**: Shared structs (`FanJSON.swift`, `TempRecord.swift`) describing deserialized telemetry packages, auto-rules, and history records. `FanJSON.swift` also holds `TriggerRule` and `TriggerRule.starterRules` — the disabled first-run curves that `loadRules()` seeds when there is no saved rules payload.
 - 📂 **`ViewModels/`**: Orchestration logic. `FanViewModel.swift` is an adapter: it polls the helper, conditions the samples, hands them to `FanControlLaw`, publishes what the law decides, and owns the privileged-helper invocation. Every helper write goes through one serial queue, so writes never overlap. It no longer contains fan-control decisions of its own. It is a single shared instance (`FanViewModel.shared`); a second instance would poll the helper and run the rules on its own.
   - `FanStores.swift`: The state the window observes, split by how often it changes. `FanTelemetry` holds the live fan readings, `MenuBarStatus` the rounded menu-bar RPM and the width reserved for it, and `FanHistoryStore` the 24-hour temperature history, kept as an append-only file in Application Support.
 - 📂 **`tests/`**: Plain executable checks for the control law and the stores, run with `tests/run-tests.sh`. There is no XCTest target.
@@ -95,7 +95,7 @@ Notable details of the current script:
 - `AppIcon.icns` is compiled from a correctly sized `.iconset`. Copying a bare `AppIcon.png` into `Resources` does not give the app an icon — the Finder and Dock read `CFBundleIconFile` as an `.icns`.
 - The version is single-sourced: `APP_VERSION` feeds both `CFBundleShortVersionString` and the DMG volume name. The window header's `v…` badge reads `CFBundleShortVersionString` from `Bundle.main` at runtime rather than hardcoding a string, so all three stay in step.
 - Notarization is **opt-in and has not been exercised on this machine**. Set `NOTARY_PROFILE` to a `notarytool` store-credentials profile to submit and staple; leave it unset and the build never touches the network.
-- `SETUID_HELPER=1` applies the setuid bit to the bundled helper after signing. It is **off by default**, and it is a convenience only — see [Configure Privilege Setup](#2-configure-privilege-setup-required-once).
+- `SETUID_HELPER=1` applies the setuid bit to the bundled helper after signing. It is **off by default**, and it is a convenience only — see [Configure Privilege Setup](#-how-to-run-the-app).
 
 By default, the build script pins the app and helper binaries to macOS 13.0 and creates a Universal 2 bundle for both Intel and Apple Silicon Macs. Every knob is overridable from the environment:
 
@@ -199,7 +199,11 @@ remove it. A helper installed that way accepts
 or any malware running as that user — can drive your fans, including to zero.
 Three things bound it today:
 
-- the helper's command surface is minimal and unchanged: `get`, `set`, `reset`;
+- the helper's command surface is small: `get`, `set`, `setall`, `reset`. The one
+  verb added to upstream's three, `setall`, grants no new capability — it is the
+  same write primitive applied to every fan in one invocation
+  (`Helper/main.swift:252-278`), so the number of SMC writes available to an
+  attacker is unchanged;
 - both binaries are signed with the **hardened runtime**, so **library
   validation** blocks a `DYLD_*` injection into the setuid binary;
 - `checkAuthorization()` rejects a helper that is not root-owned, is not setuid,
@@ -283,16 +287,20 @@ helper described above. Not a claim about every Mac.
 | Helper read path | Valid JSON on stdout, **0 bytes on stderr** — the stdout/stderr split holds, so diagnostics cannot corrupt the payload channel. |
 | Manual control accuracy | Commanded **3000 RPM → actual 3002**; commanded **6500 → actual 6499**. |
 | `reset` | Returns all fans to macOS automatic control (**mode 0**); macOS resumes managing them. |
-| Rules engine, end to end | Rule `CPU ≥ 55 °C → 45 %` at a live CPU of **65.8 °C** produced `setall 45.00 %`; both fans landed on target **4796 RPM = exactly 45.00 %** of each fan's own 2317–7826 range, and the engine then correctly stopped issuing redundant writes. |
+| Rules engine, end to end | Rule `CPU ≥ 55 °C → 45 %` at a live CPU of **65.8 °C** produced `setall 45.00 %`; both fans landed on target **4796 RPM** — the helper's own `min + (max − min) × 0.45` = 4796.05 truncated to an integer, i.e. 45.00 % of each fan's own 2317–7826 range to two decimals (2479/5509 = 44.9991 %) — and the engine then correctly stopped issuing redundant writes. |
 | Quit safety | With fans app-controlled at 4796 RPM, `SIGTERM` → process exits → fans return to **mode 0 AUTO**. (`SIGKILL` remains uncatchable — see below.) |
 | Rules decode failure | Planted invalid rule → engine disabled, original bytes survived, fans untouched. |
 
-The table above was measured on an earlier build, before the changes in
-[the Round 4 record](docs/FORK_CHANGELOG.md#round-4--2026-10-13-single-controller-write-ordering-and-the-menu-bar).
-Checked since, on the installed build: the helper is `root:wheel`, mode `4755`
-after authorization, and the fans read back in automatic mode. **Not yet
-verified on hardware:** the drift re-send under a live rule, the menu-bar width
-across a range of readings, the moving chart, and the starter curves under load.
+The table above was measured before the changes recorded in
+[the fork change record](docs/FORK_CHANGELOG.md). Checked since, on the installed
+build: the helper is `root:wheel`, mode `4755` after authorization; the fans read
+back in automatic mode; and the **history chart and the menu-bar readout were
+confirmed by screen capture**, with the UI matching the hardware exactly (Fan 0
+shown as 3420 RPM against 3420 measured, Fan 1 as 3692 against 3693).
+
+**Not yet verified on hardware:** the drift re-send under a live rule, the
+menu-bar width across the full range of readings, and the starter curves under
+real load.
 
 ### Known limitations
 
@@ -317,6 +325,16 @@ across a range of readings, the moving chart, and the starter curves under load.
   (x = −1728), which looks like the app failed to open. It is a saved-position
   problem, not a launch failure — the app is running and the menu-bar item is
   live. Known and unfixed.
+- **The Intel slice has never been run.** The bundle is universal and both
+  architectures compile clean at the 13.0 deployment target, but no Intel Mac was
+  used for testing, so treat Intel support as unverified rather than supported.
+  Specifically, the fan-mode paths diverge by architecture in `Core/SMC.swift`:
+  Apple Silicon (`Core/SMC.swift:379-389`) probes for the lowercase `F0md` key and
+  otherwise falls back to `F0Md`, and took the `unlockFanControl` route for forced
+  mode — that is the branch exercised on the M5 Max. Intel takes the `#else`
+  branch (`Core/SMC.swift:398-465`), which writes `F0Md` directly and then drives
+  the separate **`FS! ` mode-transition table** to move a fan between forced and
+  automatic. That table is a different state machine and has never executed.
 - **The setuid exposure described above is not solved by this design.** If that
   matters to you, do not run the app as a user whose local accounts or malware
   you do not trust.

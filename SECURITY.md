@@ -58,8 +58,12 @@ malware running as that user, can drive your fans — including to zero — thro
 `smc-helper set <id> 1 <rpm>`. **This design cannot eliminate it.** Describing
 the posture as "safe" or "hardened" would be inaccurate. What bounds it today:
 
-- the helper's command surface is minimal and has not been broadened —
-  `get`, `set`, `reset`;
+- the helper's command surface is small: `get`, `set`, `setall`, `reset`. One verb
+  was added to upstream's three — `setall` — but it grants **no new capability**:
+  it is the same `writeFan` primitive applied to every fan in one invocation
+  (`Helper/main.swift:252-278`), and anyone who can call `setall` could already
+  call `set` once per fan. The number of SMC writes an attacker can make is
+  unchanged from upstream;
 - both binaries carry the hardened runtime, so **library validation** blocks a
   `DYLD_*` injection into the setuid binary;
 - `checkAuthorization()` rejects a helper that is **not root-owned**, **not

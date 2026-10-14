@@ -1,36 +1,250 @@
 # Fork Change Record and Upstream Handoff Notes
 
-This document is a running record in four parts:
+This document is a running record in five parts:
 
-1. **Round 4 — 2026-10-13** (everything from the next heading down to the Round 3
+1. **Round 5 — 2026-10-13** (everything from the next heading down to the Round 4
+   heading): the consolidated hardware verification sweep on an Apple M5 Max /
+   macOS 27.2, the retirement of the Round 4 "Not verified" items that sweep
+   covers, a testing-methodology finding about stale app processes, and a
+   statement of what the sweep did **not** cover. It ships no new behaviour.
+2. **Round 4 — 2026-10-13** (everything from the Round 4 heading down to the Round 3
    heading): one shared controller instead of two, serialized helper writes and
    quit ordering, sensor conditioning, a monotonic clock, wake and drift
    re-sends, a split of the window's state, history stored as a file, and the
    menu-bar readout. It also corrects several Round 2 and Round 3 claims, marked
    inline.
-2. **Round 3 — 2026-10-13** (everything from the Round 3 heading down to the Round 2
+3. **Round 3 — 2026-10-13** (everything from the Round 3 heading down to the Round 2
    heading): hardware validation on an Apple M5 Max / macOS 27.2, plus the
    correction of Round 2's `chmod 4700` decision, which shipped broken.
-3. **Round 2 — 2026-10-13** (everything from the Round 2 heading down to the
+4. **Round 2 — 2026-10-13** (everything from the Round 2 heading down to the
    Round 1 divider): the earlier, larger round of work. Safety-relevant fixes,
    correctness fixes, build/packaging, and CI.
-4. **Round 1** (everything below the divider): the original contribution
+5. **Round 1** (everything below the divider): the original contribution
    described in the [`feature/asymmetric-fan-response`](https://github.com/ShahzaibAli02/Fanny-MacOs-FanControl/tree/feature/asymmetric-fan-response)
    work after upstream base commit `60a57f3`. It is kept **verbatim** as the
    historical record and is not retro-fitted. Where Round 1's claims are now
    stale, Round 2 says so explicitly; the original text is left alone so the
    difference between what was true then and what is true now stays visible.
 
-Rounds 1, 2 and 3 are preserved rather than rewritten, including the parts of
-Round 2 that Round 3 **corrects**, and the parts of Rounds 2 and 3 that Round 4
-corrects. Where a round's reasoning no longer holds, the wrong text stays in
-place and carries a short inline **Correction (Round 3)** or **Correction
-(Round 4)** note pointing at the current position. Deleting the mistake would hide it;
-the point of this record is that the sequence of beliefs is auditable, including
-the one that was confidently argued and wrong.
+The round numbers are **newest-first**, and they do not strictly track the order
+the work happened in. Round 5 states that openly rather than renumbering;
+renumbering would move the paragraphs that every correction cites and destroy
+the audit trail.
+
+Rounds 1 through 4 are preserved rather than rewritten, including the parts of
+Round 2 that Round 3 **corrects**, the parts of Rounds 2 and 3 that Round 4
+corrects, and the parts of Round 4 that Round 5 corrects — among them Round 4's
+claim that the quit ordering and the chart had never been exercised against real
+fans, which the later sweep contradicts. Where a round's reasoning no longer
+holds, the wrong text stays in place and carries a short inline **Correction
+(Round 3)**, **Correction (Round 4)** or **Correction (Round 5)** note pointing at
+the current position. Deleting the mistake would hide it; the point of this record
+is that the sequence of beliefs is auditable, including the one that was
+confidently argued and wrong.
 
 Round 1 was merged upstream as pull request #13; a later activation-policy change
 landed as #14, so the branch named in Round 1 is no longer where this work lives.
+
+---
+
+## Round 5 — 2026-10-13: the consolidated verification sweep
+
+### Scope
+
+Round 5 ships no new behaviour and changes no code. It exists because the
+newest round in this record claimed *less* verification than the round beneath
+it, which is an artefact of when each round was written rather than of what was
+tested. This round reconciles the record with the consolidated hardware sweep
+that has since been run, retires the Round 4 items that sweep covers, records a
+testing-methodology mistake that produced a wrong conclusion mid-round, and
+writes down plainly what the sweep did not cover.
+
+Two machines appear in this document and both are true: Round 1 and Round 2
+interactive testing was on an **M4 Pro** MacBook Pro; Round 3 onward is on an
+**Apple M5 Max MacBook Pro (identifier `Mac17,7`) running macOS 27.2**. Every
+measurement below was taken on the M5 Max unless a line says otherwise. Its two
+fans report an SMC range of **2317–7826 RPM**.
+
+### The ordering problem, stated plainly
+
+The round numbers here are newest-first, and they **do not strictly track the
+order the work happened in.** Round 4's "Not verified" section reads as though
+almost nothing had been run against real fans, and Round 3's hardware table
+directly beneath it reports the quit-reset verified on real hardware, the rules
+engine commanding exactly 45.00 % of each fan's own range, and 99 localization
+keys in parity. Both sections were accurate about the moment they were written.
+The newer one was written before the consolidated sweep and was not revisited
+afterwards, so the record now reads as regression where there was none.
+
+The tempting repair is to renumber — make the sweep Round 3 and push the
+fan-control work down to Round 5. **That would rewrite the audit trail**, which is
+the one thing this file exists to prevent: every correction below cites a round
+number and a paragraph, and "see Round 3" has to keep meaning the same text. So
+the number stays where it is, the contradiction is stated here rather than
+smoothed over, and the affected Round 4 bullets carry inline **Correction
+(Round 5)** notes pointing back at this section. A confidently wrong claim is
+more useful preserved than quietly fixed.
+
+### Hardware validation actually performed
+
+Measured on an Apple M5 Max MacBook Pro (`Mac17,7`), macOS 27.2:
+
+| Check | Result |
+|---|---|
+| Helper read path | Valid JSON on stdout, **0 bytes on stderr** — the stdout/stderr split holds, so a diagnostic cannot interleave with the payload channel. |
+| Manual control accuracy | Commanded **3000 RPM → actual 3002**; commanded **6500 → actual 6499**. |
+| `reset` | All fans return to macOS automatic control (**mode 0**); macOS resumes managing them. |
+| `setall` arithmetic | Exact against `Helper/main.swift:262–273` (`min + (max − min) × percent`, then `Int(clamped)`): `0.45` → **4796**, `0.40` → **4520**, `0.20` → **3418**, each against the fan's own 2317–7826 range. |
+| Rules engine, end to end | Rule `CPU ≥ 55 °C → 45 %` at a live CPU of **65.8 °C** produced `setall 45.00 %`. Both fans landed on target **4796 RPM** — the helper's own `min + (max − min) × 0.45` = 4796.05 truncated to an integer, i.e. 45.00 % of the 2317–7826 range to two decimals — then correctly stopped issuing redundant writes. The write goes through the single serialized helper invocation at `ViewModels/FanViewModel.swift:850–859`. |
+| Quit safety | Fans app-controlled at **4796 RPM** → `SIGTERM` → process exits → fans return to **mode 0 AUTO**. This exercises the real quit path: the dispatch-source handler at `App/FanControlApp.swift:87–102` calling `resetAllAndWait()` at `ViewModels/FanViewModel.swift:804–831`, which joins the reset behind the serial write queue (`ViewModels/FanViewModel.swift:151`) and bounds it at the 12-second wait (`ViewModels/FanViewModel.swift:802`). |
+| Rules decode failure | A planted invalid rule left the engine **off**, the original bytes intact on disk, and the fans untouched (`ViewModels/FanViewModel.swift:876–913`). |
+| Chart and menu-bar readout | Verified **in the installed build** by screen capture, with the UI matching the hardware exactly: Fan 0 UI **3420** / hardware **3420**; Fan 1 UI **3692** / hardware **3693**. |
+| App does not self-force fans | **12 samples** with no interaction: targets tracked thermal demand smoothly (**3500 → 3470**), confirming macOS remained in control rather than the app taking it. |
+| Polling cadence | **1 Hz**, matching `pollingInterval` at `ViewModels/FanViewModel.swift:380–385`. |
+| App cost at rest | ≈ **0.4–0.8 % CPU**, ≈ **127–143 MB RSS**. |
+
+Rows one through six of Round 3's hardware table are reproduced here with the
+same figures, so they are confirmed twice rather than newly established, and its
+seventh (localization parity) is carried in the gate table at the end of this
+round. What this sweep adds is everything else: the `setall` arithmetic checked
+point by point, the chart and menu-bar readout screen-captured in the installed
+build, the 12-sample check that the app does not self-force the fans, the polling
+cadence, and the app's cost at rest.
+
+### Round 4 "Not verified" items, itemised
+
+**Retired by this sweep:**
+
+- *"The moving chart, and the menu-bar readout, in the installed build."* —
+  **retired.** Both were screen-captured in the installed build and the readout
+  matched hardware to within a single RPM on both fans. The screenshot confirms
+  the chart renders and the value is right; that the rolling window actually
+  *advances* rests on `TimelineView(.periodic(from: .now, by: 5))` at
+  `Views/TempHistoryChartView.swift:748–756`, which is code evidence rather than
+  a measurement.
+- *"the quit ordering … with writes to real fans"* — **retired.** `SIGTERM` at
+  4796 RPM returned both fans to mode 0 AUTO. This is the item Round 4 said had
+  only been checked by reading the code.
+
+**Partly retired:**
+
+- *"Linked-fan changes … with writes to real fans"* — **half.** The per-fan
+  projection arithmetic is now measured against real hardware (`0.45` → 4796,
+  `0.40` → 4520, `0.20` → 3418, each fan's own range) and the single-`setall`
+  path behind it is exercised by the rules-engine row above. What was **not**
+  done is clicking the linked-fan toggle in the UI.
+
+**Still open, and now explicitly so:**
+
+- *"the helper's timeouts"* — **open.** No run in the sweep wedged a helper, so
+  the bounded stop (SIGTERM, then SIGKILL, each wait bounded) was never
+  triggered. The timeouts are code; they have not been tested against a failure.
+- *"The drift re-send under a live rule"* — **open.** The 12-sample row above
+  shows the app does *not* self-force fans when the engine is off; the re-send
+  only fires when a rule is in charge and pushes in the **opposite** direction.
+  The two do not test each other. The gating logic still has no unit test.
+  **Unverified.**
+- *"The menu-bar width across the whole fan range"* — **open.** The readout's
+  *value* is now confirmed; its *width* at every point in the range is not, and
+  no measurement in this sweep covers it. **Unverified.**
+- *"The starter curves under real load"* — **open.** The rules-engine row used a
+  single step (`CPU ≥ 55 °C → 45 %`), not the starter curves at
+  `Models/FanJSON.swift:98–121`. **Unverified.**
+- *"The Intel path"* — **open.** It compiles; it has never been run.
+- *"Migration from a real pre-Round-4 UserDefaults history"* — **open.** A unit
+  test is all that exists.
+- *"The cause of the second `FanViewModel` instance"* — **open.** See below.
+
+**And the parenthetical reason Round 4 gave:**
+
+- *"not by running writes, so that no fan was touched during testing"* — that
+  was a correct decision for Round 4 and is **left standing**. It is simply no
+  longer a description of the project: the sweep above commanded both fans
+  repeatedly, by hand, under supervision, and returned them to automatic control
+  afterwards. Not touching fans was a good instinct at the time. It just cannot
+  be the reason a claim about fan writes stays unverified forever.
+
+### A testing-methodology finding worth keeping
+
+During Round 3's hardware validation, **stale duplicate app processes left over
+from earlier ad-hoc terminal launches were found running old code.** They
+produced misleading observations on their own: rules from a previous build still
+in force, fan modes left stale by an older copy, and two processes writing
+interleaved logs.
+
+One conclusion drawn mid-round — that **the rules engine never fires** — was
+traced to exactly this, and was wrong. The engine was firing; the observation was
+coming from a process that predated the code being looked at.
+
+The lesson is narrow and mechanical: **kill every instance, and confirm zero
+processes remain, before concluding anything at all from a running app.** A
+result that contradicts an expectation is the exact moment to check for a stale
+process first, because that is the cheapest explanation and the most embarrassing
+one to publish.
+
+**This is not the same finding as Round 4's two-`FanViewModel`-instances
+problem.** Two stale processes are two processes; two view models inside one
+process are one process, with one set of logs and one set of preferences. Round 4
+replaced the view model with a single `static let shared`
+(`ViewModels/FanViewModel.swift:13`) and the single-instance count is verified —
+but the cause of the original second instance **remains unconfirmed**, and the
+stale-process discovery does not explain it. The two must not be conflated.
+
+### Still not verified
+
+Carried forward unchanged. Nothing in this round retires any of these:
+
+- **`SIGKILL` / Force Quit still latches the fans.** No process can catch it.
+  The catchable termination signals — ⌘Q, `SIGTERM`, `SIGINT`, `SIGHUP` — *are*
+  handled (`App/FanControlApp.swift:83–102`), and ⌘Q and `SIGTERM` are now
+  verified on real hardware. `SIGKILL` is an OS limit and is not fixable in this
+  process.
+- **The Intel path.** It compiles; it has never been run. No Intel Mac was used.
+- **Notarization / stapling.** `NOTARY_PROFILE` is opt-in and has never been
+  exercised. The tested build is **ad-hoc signed** (`-`), not Developer ID signed.
+- **Linked-fan toggle via real UI interaction.** The projection logic and the
+  single-`setall` path are verified by code reading and by direct `setall`
+  execution; the toggle itself was not clicked through.
+- **Non-English in-app rendering**, and **native-speaker translation review** of
+  German, Spanish and Simplified Chinese. Only English and French have been
+  verified in the running app; the other three must not be presented as
+  release-ready translations.
+- **A VoiceOver pass.** Never performed.
+- **Migration from a real pre-Round-4 UserDefaults history.** Unit test only.
+- **The cause of Round 4's second in-process `FanViewModel`.** Still unconfirmed.
+- **The helper's bounded stop.** Never exercised, because nothing wedged a
+  helper during the sweep.
+
+The setuid exposure described in the Round 2 and Round 3 sections is unchanged by
+this round: the helper still does no caller authentication and must still be
+world-executable at `4755` because the app launches it directly with `Process`
+and never through `sudo`. The accepted fix remains an XPC privileged helper
+(`SMJobBless`). **Not implemented.** This design is bounded, not safe.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| App typecheck | **0 errors, 0 warnings** at `arm64@13.0`, `x86_64@13.0`, `arm64@15.0` |
+| Helper typecheck | **0 errors, 0 warnings** at `arm64@13.0` |
+| Universal build | `x86_64 arm64`, `minos 13.0` on both binaries |
+| Signature | `codesign --verify --deep --strict` → **PASS** (ad-hoc `-`) |
+| `verify-build.sh` | **All build checks passed** |
+| `check-localization.sh` | **PASS**, exit 0 — 99 keys × 5 languages in parity |
+| `tests/run-tests.sh` | **44/44 checks passed** |
+| `build.sh` syntax | `bash -n` OK |
+
+The two read-only checks were **re-run after this round's edits**:
+`bash .github/scripts/check-localization.sh` reported 99 keys each for `de`,
+`en`, `es`, `fr` and `zh-Hans` and exited **0**, and `bash tests/run-tests.sh`
+reported **44/44**. The typecheck, build, signature and `verify-build.sh` rows
+are carried from the same sweep and were **not** re-run, because this round
+changed no code.
+
+Note what the localization check does and does not prove: it compares the five
+languages **to each other**, never against the literals actually used in source.
+It proves **parity, not coverage** — it cannot detect a key that SwiftUI uses and
+that no `.strings` file declares.
 
 ---
 
@@ -216,25 +430,71 @@ These are the changes a user can see. Everything else is internal.
 - The drift re-send under a live rule. The gating logic has no unit test, because
   it lives in the view model.
 - The menu-bar width across the whole fan range, on the installed build.
+
+  > **Round 5 note:** still open. The readout's *value* is now confirmed in the
+  > installed build; its *width* at every point in the fan range is not, and no
+  > measurement in the Round 5 sweep covers it. **Unverified.**
 - The moving chart, and the menu-bar readout, in the installed build. A screen
   capture was not reliable enough to use.
+
+  > **Correction (Round 5):** retired. Both were screen-captured in the installed
+  > build, and the readout matched the hardware exactly — Fan 0 UI 3420 against
+  > hardware 3420, Fan 1 UI 3692 against hardware 3693. The capture confirms the
+  > chart renders and the value is right; that the rolling window *advances* on
+  > its five-second timeline rests on `Views/TempHistoryChartView.swift:748–756`,
+  > which is code evidence rather than a measurement. See Round 5.
 - The starter curves under real load.
+
+  > **Round 5 note:** still open. The Round 5 rules-engine test used a single step
+  > (`CPU ≥ 55 °C → 45 %`), not the starter curves. **Unverified.**
 - Linked-fan changes, the quit ordering, and the helper's timeouts, with writes
   to real fans. These were checked by reading the code and by compiling, not by
   running writes, so that no fan was touched during testing.
+
+  > **Correction (Round 5):** the quit ordering is retired — fans app-controlled
+  > at 4796 RPM, `SIGTERM`, process exits, both fans back to mode 0 AUTO. The
+  > linked-fan arithmetic is retired — `0.45` → 4796, `0.40` → 4520, `0.20` →
+  > 3418, each against the fan's own 2317–7826 range. Two parts of this bullet
+  > are **not** retired: the linked-fan toggle was never clicked through in the
+  > UI, and the helper's timeouts were never exercised, because no run wedged a
+  > helper. The closing sentence was a good decision for Round 4 and is left
+  > standing; it is simply no longer true of the project, which has since
+  > commanded both fans by hand under supervision. See Round 5.
 - The Intel path, which compiles but has not been run.
 - Migration from a real pre-Round-4 UserDefaults history. Migration is covered by
   a unit test only.
 - The cause of the second `FanViewModel` instance.
 
+  > **Correction (Round 5):** still unconfirmed, and not explained by Round 5's
+  > stale-process finding. That finding was two *processes* running old code;
+  > this is two view models inside *one* process. The single-instance fix is
+  > verified by count; the cause is not. See Round 5.
+
 ### Known limitations after Round 4
 
 - The unit checks are not in CI.
+
+  > **Round 5 note:** still true. `.github/workflows/ci.yml` runs two
+  > check-only jobs, `build` and `localization`, and neither runs `tests/`.
+  > Running them locally remains `tests/run-tests.sh` — 44/44 on this round. Adding
+  > them as a CI job is a separate change and has not been started.
 - The setuid exposure in the Round 2 and Round 3 sections is unchanged. A later
   round would have to address it with an XPC helper.
+
+  > **Round 5 note:** unchanged and re-confirmed. The helper still does no
+  > caller authentication and must still be world-executable at `4755`, because
+  > the app launches it directly with `Process` and never through `sudo`. The
+  > accepted fix remains `SMJobBless`. **Not implemented.**
 - The response-tuning defaults and the add-rule default (CPU ≥ 60 °C → 50%,
   enabled) are unchanged. They are the next candidates for the cooling-behaviour
   question.
+
+  > **Round 5 note:** confirmed unchanged by reading the tree — the add-rule
+  > default is at `Views/RulesEngineView.swift:198`, and the response-tuning
+  > defaults are untouched in `ViewModels/FanViewModel.swift`. The question is
+  > still open and the sweep does not answer it: the rules-engine test drove a
+  > single step to 45 %, which exercises neither the starter curves nor the
+  > rise/fall limits, hysteresis, deadband or cooling confirmation. **Unverified.**
 
 ---
 
@@ -296,6 +556,15 @@ any malware running as that user, can drive the fans through
 it.** What bounds it today:
 
 - the helper's command surface is minimal and unchanged — `get`, `set`, `reset`;
+  > **Round 5 note:** accurate when Round 2 was written, superseded since. Round 4
+  > added a fourth verb, `setall`, so the surface is `get`, `set`, `setall`,
+  > `reset`. It grants **no new capability**: `setAllFans` loops over the fans and
+  > calls the same `writeFan(smc, fanId:, mode: 1, speed:)` primitive that `set`
+  > uses (`Helper/main.swift:252-278`). Anyone who can call `setall` could already
+  > call `set` once per fan, so the number of SMC writes available to an attacker
+  > is unchanged from upstream. The bullet's claim, not just its wording, needs the
+  > qualification — "unchanged" is no longer true, even though the underlying bound
+  > is as strong as it was.
 - both binaries are signed with the **hardened runtime**, so **library
   validation** blocks a `DYLD_*` injection into the setuid binary;
 - `checkAuthorization()` rejects a helper that is not root-owned, not setuid, not
@@ -366,7 +635,11 @@ Measured on an **Apple M5 Max MacBook Pro, macOS 27.2**:
 | Helper read path | Valid JSON on stdout, **0 bytes on stderr** — confirms the Round 2 stdout/stderr split holds and a diagnostic cannot corrupt the payload channel. |
 | Manual control accuracy | Commanded **3000 RPM → actual 3002**; commanded **6500 → actual 6499**. |
 | `reset` | Returns all fans to macOS automatic control (**mode 0**); macOS resumes managing them. |
-| Rules engine, end to end | Rule `CPU ≥ 55 °C → 45 %` at a live CPU of **65.8 °C** produced `setall 45.00 %`; both fans landed on target **4796 RPM = exactly 45.00 %** of each fan's own **2317–7826** range, then correctly stopped issuing redundant writes. |
+| Rules engine, end to end | Rule `CPU ≥ 55 °C → 45 %` at a live CPU of **65.8 °C** produced `setall 45.00 %`; both fans landed on target **4796 RPM = exactly 45.00 %** of each fan's own **2317–7826** range, then correctly stopped issuing redundant writes.
+  > **Round 5 note:** the measurement is right; "exactly 45.00 %" is slightly
+  > overstated. 2479/5509 = **44.9991 %**, and 4796 is the integer truncation of
+  > the helper's `min + (max − min) × 0.45` = 4796.05. It is 45.00 % to two
+  > decimals. The Round 5 hardware table states it the precise way.
 | Quit safety | With fans app-controlled at 4796 RPM: `SIGTERM` → process exits → fans return to **mode 0 AUTO**. |
 | Rules decode failure | Planted invalid rule → engine disabled, original bytes survived, fans untouched. |
 | Localization parity | `bash .github/scripts/check-localization.sh` → **PASS**, 99 keys, all 5 languages in parity. (The Round 2 note that this script "currently fails" is resolved.) |
